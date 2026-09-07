@@ -22,6 +22,7 @@
         "onLanguage:ncl",
         "onLanguage:html",
         "onCommand:ginga.openPlayer",
+        "onCommand:ginga.checkForUpdate",
         "workspaceContains:**/*.ncl",
         "workspaceContains:**/*.html",
         "onStartupFinished"
@@ -46,6 +47,11 @@
                 "command": "ginga.openPlayer",
                 "title": "Run Ginga Application",
                 "icon": "$(play)"
+            },
+            {
+                "command": "ginga.checkForUpdate",
+                "title": "Check for Ginga Player Updates",
+                "category": "Ginga"
             }
         ],
         "menus": {
