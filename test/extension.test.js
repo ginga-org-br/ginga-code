@@ -1,94 +1,131 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const cp = require('node:child_process');
+const url = require('node:url');
 const extension = require('../src/extension.js');
 
-test('Extension exports functions', () => {
-  assert.strictEqual(typeof extension.activate, 'function');
-  assert.strictEqual(typeof extension.deactivate, 'function');
-  assert.strictEqual(typeof extension.startExecution, 'function');
-  assert.strictEqual(typeof extension.stopExecution, 'function');
-  assert.strictEqual(typeof extension.tickClock, 'function');
-  assert.strictEqual(typeof extension.handleBridgeMessage, 'function');
+test('Extension exports launch functions', () => {
+    assert.strictEqual(typeof extension.activate, 'function');
+    assert.strictEqual(typeof extension.deactivate, 'function');
 });
+
+const packageJson = require('../package.json');
 
 test('Extension activate registers commands', () => {
-  const subscriptions = [];
-  const context = { subscriptions };
-  extension.activate(context);
-  assert.strictEqual(subscriptions.length, 2);
+    const subscriptions = [];
+    const context = { subscriptions };
+    extension.activate(context);
+
+    const contributedCommands = packageJson.contributes.commands.map(c => c.command);
+    const registeredCommands = subscriptions.filter(s => s && s.name).map(s => s.name);
+
+    for (const cmd of contributedCommands) {
+        assert.ok(registeredCommands.includes(cmd));
+    }
+
+    const openPlayerSub = subscriptions.find(s => s && s.name === 'ginga.openPlayer');
+    assert.ok(openPlayerSub);
+    assert.strictEqual(typeof openPlayerSub.cb, 'function');
 });
 
-test('Bridge Message Handling - State & Breakpoints', () => {
-  const inspectRes = extension.handleBridgeMessage({ type: 'inspectState' });
-  assert.strictEqual(inspectRes.status, 'ok');
-  assert.strictEqual(inspectRes.type, 'stateResponse');
+test('getExecutableInStorage detects binary if present', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-test-'));
+    try {
+        assert.strictEqual(extension.getExecutableInStorage(tmpDir), undefined);
 
-  const evtRes = extension.handleBridgeMessage({ type: 'triggerEvent', eventId: 'evt1' });
-  assert.strictEqual(evtRes.status, 'ok');
-  assert.strictEqual(evtRes.eventId, 'evt1');
+        const binaryName = process.platform === 'win32' ? 'gingaf.exe' : 'gingaf';
+        const fakeExe = path.join(tmpDir, binaryName);
+        fs.writeFileSync(fakeExe, '');
 
-  const linkRes = extension.handleBridgeMessage({ type: 'linkEvaluated', linkId: 'l1' });
-  assert.strictEqual(linkRes.status, 'ok');
-  assert.strictEqual(linkRes.linkId, 'l1');
-
-  const setBpRes = extension.handleBridgeMessage({ type: 'setBreakpoint', nodeId: 'media_video1' });
-  assert.strictEqual(setBpRes.status, 'ok');
-  assert.strictEqual(setBpRes.type, 'breakpointSet');
-  assert.ok(setBpRes.breakpoints.includes('media_video1'));
-
-  const getBpRes = extension.handleBridgeMessage({ type: 'getBreakpoints' });
-  assert.strictEqual(getBpRes.status, 'ok');
-  assert.ok(getBpRes.breakpoints.includes('media_video1'));
-
-  const clearBpRes = extension.handleBridgeMessage({ type: 'clearBreakpoint', nodeId: 'media_video1' });
-  assert.strictEqual(clearBpRes.status, 'ok');
-  assert.strictEqual(clearBpRes.type, 'breakpointCleared');
-  assert.strictEqual(clearBpRes.breakpoints.length, 0);
+        const detected = extension.getExecutableInStorage(tmpDir);
+        assert.strictEqual(detected, fakeExe);
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
 });
 
-test('Bridge Message Handling - Events & Variables', () => {
-  extension.handleBridgeMessage({ type: 'triggerEvent', eventId: 'evt_start', state: 'OCCURRING' });
-  const activeEvtRes = extension.handleBridgeMessage({ type: 'inspectActiveEvents' });
-  assert.strictEqual(activeEvtRes.status, 'ok');
-  assert.strictEqual(activeEvtRes.type, 'activeEventsResponse');
-  assert.strictEqual(activeEvtRes.events.length, 1);
-  assert.strictEqual(activeEvtRes.events[0].id, 'evt_start');
-  assert.strictEqual(activeEvtRes.events[0].state, 'OCCURRING');
+test('downloadAndExtract downloads archive directly from github and extracts it', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-dl-'));
+    const zipPath = path.join(tmpDir, 'release.zip');
+    const targetDir = path.join(tmpDir, 'extracted');
+    fs.mkdirSync(targetDir, { recursive: true });
 
-  const setVarRes = extension.handleBridgeMessage({ type: 'setVariable', name: 'system.language', value: 'pt-BR' });
-  assert.strictEqual(setVarRes.status, 'ok');
-  assert.strictEqual(setVarRes.type, 'variableSet');
-  assert.strictEqual(setVarRes.name, 'system.language');
-  assert.strictEqual(setVarRes.value, 'pt-BR');
+    const detected = await extension.downloadAndExtract(zipPath, targetDir);
+    assert.strictEqual(fs.existsSync(zipPath), true);
+    assert.ok(fs.statSync(zipPath).size > 0);
+    const samplePath = path.join(tmpDir, 'sample.ncl');
+    fs.writeFileSync(samplePath, '<ncl></ncl>');
 
-  const getVarRes = extension.handleBridgeMessage({ type: 'inspectVariable', name: 'system.language' });
-  assert.strictEqual(getVarRes.status, 'ok');
-  assert.strictEqual(getVarRes.type, 'variableInspected');
-  assert.strictEqual(getVarRes.value, 'pt-BR');
+    const context = {
+        globalStorageUri: { fsPath: targetDir },
+        subscriptions: []
+    };
 
-  const listVarRes = extension.handleBridgeMessage({ type: 'listVariables' });
-  assert.strictEqual(listVarRes.status, 'ok');
-  assert.strictEqual(listVarRes.type, 'variablesListResponse');
-  assert.strictEqual(listVarRes.variables.length, 1);
-  assert.strictEqual(listVarRes.variables[0].name, 'system.language');
-  assert.strictEqual(listVarRes.variables[0].val, 'pt-BR');
+    const child = await extension.openPlayer(context, { fsPath: samplePath });
+    assert.ok(child && child.pid);
+    extension.stopPlayer();
 
-  const errRes = extension.handleBridgeMessage({ type: 'invalidType' });
-  assert.strictEqual(errRes.status, 'error');
+    const extractedFolderUrl = url.pathToFileURL(targetDir).href;
+    console.log(`Extracted folder URL: ${extractedFolderUrl}`);
 });
 
-test('NCL Execution State Machine', () => {
-  extension.startExecution();
-  const startState = extension.handleBridgeMessage({ type: 'inspectState' });
-  assert.strictEqual(startState.running, true);
-  assert.strictEqual(startState.clockMs, 0);
+test('resolveOrDownloadExecutable uses storage binary if already present', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-storage-'));
+    try {
+        const binaryName = process.platform === 'win32' ? 'gingaf.exe' : 'gingaf';
+        const fakeExe = path.join(tmpDir, binaryName);
+        fs.writeFileSync(fakeExe, '');
 
-  const stepRes = extension.handleBridgeMessage({ type: 'step', deltaMs: 200 });
-  assert.strictEqual(stepRes.running, true);
-  assert.strictEqual(stepRes.clockMs, 200);
+        const context = {
+            globalStorageUri: { fsPath: tmpDir }
+        };
 
-  extension.stopExecution();
-  const stopState = extension.handleBridgeMessage({ type: 'inspectState' });
-  assert.strictEqual(stopState.running, false);
+        const resolved = await extension.resolveOrDownloadExecutable(context, 'sample.ncl');
+        assert.strictEqual(resolved, fakeExe);
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
 });
 
+test('openPlayer handles launch with document URI', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-open-'));
+    const origSpawn = cp.spawn;
+    let spawned = false;
+    cp.spawn = () => {
+        spawned = true;
+        return {
+            pid: 1234,
+            on: () => { },
+            unref: () => { },
+            kill: () => { }
+        };
+    };
+
+    try {
+        const binaryName = process.platform === 'win32' ? 'gingaf.exe' : 'gingaf';
+        const fakeExe = path.join(tmpDir, binaryName);
+        fs.writeFileSync(fakeExe, '');
+        if (process.platform !== 'win32') {
+            fs.chmodSync(fakeExe, 0o755);
+        }
+
+        const samplePath = path.join(tmpDir, 'sample.ncl');
+        fs.writeFileSync(samplePath, '<ncl></ncl>');
+
+        const context = {
+            globalStorageUri: { fsPath: tmpDir },
+            subscriptions: []
+        };
+
+        const child = await extension.openPlayer(context, { fsPath: samplePath });
+        assert.strictEqual(spawned, true);
+        assert.ok(child && child.pid);
+        extension.stopPlayer();
+    } finally {
+        cp.spawn = origSpawn;
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});

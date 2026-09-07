@@ -26,7 +26,7 @@ clean:
 	rm -rf .vscode-test
 	rm -f *.vsix
 
-CODE_CMD := code
+CODE_CMD ?= code
 
 run-vscode-with-extension-only: build
 	rm -rf .vscode-test/exts
