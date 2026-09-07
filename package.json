@@ -2,7 +2,7 @@
     "name": "ginga-code",
     "displayName": "Ginga Code",
     "description": "VS Code extension for execution of Ginga application",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "publisher": "ginga-org-br",
     "icon": "ginga-logo.png",
     "repository": {
@@ -22,6 +22,7 @@
         "onLanguage:ncl",
         "onLanguage:html",
         "onCommand:ginga.openPlayer",
+        "onCommand:ginga.checkForUpdate",
         "workspaceContains:**/*.ncl",
         "workspaceContains:**/*.html",
         "onStartupFinished"
@@ -46,6 +47,11 @@
                 "command": "ginga.openPlayer",
                 "title": "Run Ginga Application",
                 "icon": "$(play)"
+            },
+            {
+                "command": "ginga.checkForUpdate",
+                "title": "Check for Ginga Player Updates",
+                "category": "Ginga"
             }
         ],
         "menus": {

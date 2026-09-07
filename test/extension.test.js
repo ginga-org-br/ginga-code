@@ -46,6 +46,18 @@ test('getExecutableInStorage detects binary if present', () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 });
+test('getLatestVersion discovers release version or fallback', async () => {
+    const version = await extension.getLatestVersion();
+    assert.strictEqual(typeof version, 'string');
+    assert.ok(/^[0-9.]+/.test(version));
+});
+
+test('getDownloadUrl resolves valid download url', async () => {
+    const url = await extension.getDownloadUrl();
+    assert.strictEqual(typeof url, 'string');
+    assert.ok(url.startsWith('https://github.com/ginga-org-br/gingaf/releases/download/'));
+    assert.ok(url.endsWith('.zip'));
+});
 
 test('downloadAndExtract downloads archive directly from github and extracts it', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-dl-'));
@@ -53,9 +65,16 @@ test('downloadAndExtract downloads archive directly from github and extracts it'
     const targetDir = path.join(tmpDir, 'extracted');
     fs.mkdirSync(targetDir, { recursive: true });
 
-    const detected = await extension.downloadAndExtract(zipPath, targetDir);
+    const downloadUrl = await extension.getDownloadUrl();
+    const versionMatch = downloadUrl.match(/\/download\/v?([^/]+)\//);
+    const version = versionMatch ? versionMatch[1] : await extension.getLatestVersion();
+    console.log(`Downloaded version: ${version}`);
+
+    const detected = await extension.downloadAndExtract(zipPath, targetDir, downloadUrl);
     assert.strictEqual(fs.existsSync(zipPath), true);
     assert.ok(fs.statSync(zipPath).size > 0);
+    const installed = extension.getInstalledVersion(targetDir);
+    assert.strictEqual(installed, version);
     const samplePath = path.join(tmpDir, 'sample.ncl');
     fs.writeFileSync(samplePath, '<ncl></ncl>');
 
@@ -129,3 +148,56 @@ test('openPlayer handles launch with document URI', async () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 });
+
+test('setInstalledVersion and getInstalledVersion persist version to storage', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-ver-'));
+    try {
+        assert.strictEqual(extension.getInstalledVersion(tmpDir), undefined);
+        extension.setInstalledVersion(tmpDir, '0.2.0');
+        assert.strictEqual(extension.getInstalledVersion(tmpDir), '0.2.0');
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test('isNewerVersion compares versions correctly', () => {
+    assert.strictEqual(extension.isNewerVersion('0.2.0', '0.1.1'), true);
+    assert.strictEqual(extension.isNewerVersion('0.2.0', '0.2.0'), false);
+    assert.strictEqual(extension.isNewerVersion('0.1.0', '0.2.0'), false);
+    assert.strictEqual(extension.isNewerVersion('0.2.0', undefined), true);
+    assert.strictEqual(extension.isNewerVersion('0.2.0', 'unknown'), true);
+});
+
+test('checkForUpdate detects whether update is available', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-check-'));
+    try {
+        extension.setInstalledVersion(tmpDir, '0.0.1');
+        const context = { globalStorageUri: { fsPath: tmpDir } };
+        const resultOutdated = await extension.checkForUpdate(context);
+        assert.strictEqual(resultOutdated.updateAvailable, true);
+        assert.strictEqual(resultOutdated.installedVersion, '0.0.1');
+
+        extension.setInstalledVersion(tmpDir, resultOutdated.latestVersion);
+        const resultCurrent = await extension.checkForUpdate(context);
+        assert.strictEqual(resultCurrent.updateAvailable, false);
+        assert.strictEqual(resultCurrent.installedVersion, resultOutdated.latestVersion);
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test('downloadFile creates destination directory recursively if it does not exist', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ginga-mkdir-'));
+    try {
+        const nestedDir = path.join(tmpDir, 'nested', 'storage');
+        const zipPath = path.join(nestedDir, 'sample.txt');
+        assert.strictEqual(fs.existsSync(nestedDir), false);
+        const downloadUrl = await extension.getDownloadUrl();
+        await extension.downloadFile(downloadUrl, zipPath);
+        assert.strictEqual(fs.existsSync(zipPath), true);
+        assert.strictEqual(fs.existsSync(nestedDir), true);
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
