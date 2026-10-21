@@ -5,3 +5,9 @@ Makefile
 test/**
 package-lock.json
 *.vsix
+scripts/**
+*.code-workspace
+examples/**
+*.md
+!README.md
+!readme.md
