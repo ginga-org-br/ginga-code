@@ -71,6 +71,7 @@ function logToOutput(message) {
 }
 
 function getExecutableInStorage(storageDir) {
+    if (!storageDir) return undefined;
     if (process.platform === 'win32') {
         const exe = path.join(storageDir, 'gingaf.exe');
         if (fs.existsSync(exe)) return exe;
@@ -86,7 +87,38 @@ function getExecutableInStorage(storageDir) {
     return undefined;
 }
 
-function getInstalledVersion(storageDir) {
+function getSystemExecutable() {
+    if (process.platform === 'linux') {
+        if (fs.existsSync('/usr/bin/gingaf')) return '/usr/bin/gingaf';
+        if (fs.existsSync('/usr/local/bin/gingaf')) return '/usr/local/bin/gingaf';
+        try {
+            const whichGingaf = cp.execSync('which gingaf 2>/dev/null', { encoding: 'utf8' }).trim();
+            if (whichGingaf && fs.existsSync(whichGingaf)) return whichGingaf;
+        } catch (e) { }
+    }
+    return undefined;
+}
+
+function getExecutable(storageDir) {
+    const storageExec = getExecutableInStorage(storageDir);
+    if (storageExec) return storageExec;
+    return getSystemExecutable();
+}
+
+function getSystemInstalledVersion() {
+    if (process.platform === 'linux') {
+        try {
+            const out = cp.execSync("dpkg-query -W -f='${Version}' gingaf 2>/dev/null", { encoding: 'utf8' }).trim();
+            if (out) {
+                const match = out.match(/\d+(\.\d+)+/);
+                return match ? match[0] : out;
+            }
+        } catch (e) { }
+    }
+    return undefined;
+}
+
+function getInstalledVersion(storageDir, checkSystem = false) {
     if (storageDir) {
         const versionFile = path.join(storageDir, 'version.txt');
         if (fs.existsSync(versionFile)) {
@@ -95,6 +127,10 @@ function getInstalledVersion(storageDir) {
                 if (ver) return ver;
             } catch (e) { }
         }
+    }
+    if (checkSystem) {
+        const sysVer = getSystemInstalledVersion();
+        if (sysVer) return sysVer;
     }
     if (extensionContext && extensionContext.globalState) {
         return extensionContext.globalState.get('installedGingafVersion');
@@ -119,6 +155,14 @@ function setInstalledVersion(storageDir, version) {
     }
 }
 
+function isDifferentVersion(serverVersion, installedVersion) {
+    if (!installedVersion || installedVersion === 'unknown') return true;
+    if (!serverVersion) return false;
+    const cleanServer = serverVersion.replace(/^v/, '').trim();
+    const cleanInstalled = installedVersion.replace(/^v/, '').trim();
+    return cleanServer !== cleanInstalled;
+}
+
 function isNewerVersion(latest, current) {
     if (!current || current === 'unknown') return true;
     if (!latest) return false;
@@ -140,7 +184,7 @@ function getPlatformName() {
         const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
         platformName = `macos-${arch}`;
     } else if (process.platform === 'linux') {
-        const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+        const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
         platformName = `linux-${arch}`;
     }
     return platformName;
@@ -148,7 +192,7 @@ function getPlatformName() {
 
 function getLatestVersion() {
     return new Promise((resolve) => {
-        const fallbackVersion = '0.2.0';
+        const fallbackVersion = '0.3.0';
         const req = https.get('https://github.com/ginga-org-br/gingaf/releases/latest', {
             agent: false,
             headers: { 'User-Agent': 'VSCode-Ginga' }
@@ -172,6 +216,13 @@ function getLatestVersion() {
 
 async function getDownloadUrl() {
     const version = await getLatestVersion();
+    if (process.platform === 'linux') {
+        const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+        return `https://github.com/ginga-org-br/gingaf/releases/download/v${version}/gingaf-v${version}-linux-${arch}.deb`;
+    }
+    if (process.platform === 'darwin') {
+        return `https://github.com/ginga-org-br/gingaf/releases/download/v${version}/gingaf-v${version}-macos.zip`;
+    }
     const platformName = getPlatformName();
     const zipName = `gingaf-v${version}-${platformName}.zip`;
     return `https://github.com/ginga-org-br/gingaf/releases/download/v${version}/${zipName}`;
@@ -218,7 +269,37 @@ function extractZip(zipPath, storageDir) {
     }
 }
 
-async function downloadAndExtract(zipPath, storageDir, url) {
+function runDebInstaller(debPath) {
+    const installCmd = `sudo apt install -y "${debPath}"`;
+    logToOutput(`[Ginga Player] Debian package downloaded to: ${debPath}`);
+    logToOutput(`[Ginga Player] To install it, run: ${installCmd}`);
+
+    if (vscode && vscode.window && vscode.window.showInformationMessage) {
+        const res = vscode.window.showInformationMessage(
+            `Ginga player downloaded to ${debPath}. Install it with: ${installCmd}`,
+            'Copy Command',
+            'Open Terminal'
+        );
+        if (res && typeof res.then === 'function') {
+            res.then((selection) => {
+                if (selection === 'Copy Command') {
+                    if (vscode.env && vscode.env.clipboard) {
+                        vscode.env.clipboard.writeText(installCmd);
+                    }
+                } else if (selection === 'Open Terminal') {
+                    if (vscode.window.createTerminal) {
+                        const terminal = vscode.window.createTerminal('Ginga Installer');
+                        terminal.show();
+                        terminal.sendText(installCmd, false);
+                    }
+                }
+            });
+        }
+    }
+    return installCmd;
+}
+
+async function downloadAndExtract(packagePath, storageDir, url) {
     if (storageDir && !fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
     }
@@ -226,9 +307,28 @@ async function downloadAndExtract(zipPath, storageDir, url) {
     const versionMatch = downloadUrl.match(/\/download\/v?([^/]+)\//);
     const downloadedVersion = versionMatch ? versionMatch[1] : undefined;
     logToOutput(`[Ginga Player] Downloading release from: ${downloadUrl}`);
-    await downloadFile(downloadUrl, zipPath);
-    extractZip(zipPath, storageDir);
-    const downloadedExec = getExecutableInStorage(storageDir);
+    await downloadFile(downloadUrl, packagePath);
+
+    const isDeb = (downloadUrl && downloadUrl.endsWith('.deb')) ||
+                  (packagePath && packagePath.endsWith('.deb')) ||
+                  process.platform === 'linux';
+
+    if (isDeb) {
+        runDebInstaller(packagePath);
+    } else {
+        extractZip(packagePath, storageDir);
+    }
+
+    if (process.platform === 'linux' && storageDir) {
+        const binInStorage = path.join(storageDir, 'gingaf');
+        if (!fs.existsSync(binInStorage) && fs.existsSync('/usr/bin/gingaf')) {
+            try {
+                fs.symlinkSync('/usr/bin/gingaf', binInStorage);
+            } catch (e) { }
+        }
+    }
+
+    const downloadedExec = getExecutable(storageDir);
     if (downloadedExec && fs.existsSync(downloadedExec)) {
         if (process.platform !== 'win32') {
             try {
@@ -238,7 +338,7 @@ async function downloadAndExtract(zipPath, storageDir, url) {
         if (downloadedVersion) {
             setInstalledVersion(storageDir, downloadedVersion);
         }
-        logToOutput(`[Ginga Player] Successfully downloaded and extracted release executable: ${downloadedExec}`);
+        logToOutput(`[Ginga Player] Successfully downloaded and installed release executable: ${downloadedExec}`);
     }
     return downloadedExec;
 }
@@ -257,20 +357,33 @@ async function resolveOrDownloadExecutable(context, documentPath) {
         ? context.globalStorageUri.fsPath
         : (context && context.extensionPath ? path.join(context.extensionPath, 'bin') : path.join(__dirname, '..', 'bin'));
 
-    const storageExec = getExecutableInStorage(storageDir);
-    if (storageExec && fs.existsSync(storageExec)) {
-        logToOutput(`[Ginga Player] Using downloaded release executable from storage: ${storageExec}`);
+    const storageExec = getExecutable(storageDir);
+    const installedVersion = getInstalledVersion(storageDir, true);
+    let serverVersion = undefined;
+    try {
+        serverVersion = await getLatestVersion();
+    } catch (e) { }
+
+    const hasInstalledVersion = Boolean(installedVersion && installedVersion !== 'unknown');
+    const isDifferent = hasInstalledVersion
+        ? (serverVersion ? isDifferentVersion(serverVersion, installedVersion) : false)
+        : !storageExec;
+
+    if (storageExec && fs.existsSync(storageExec) && !isDifferent) {
+        logToOutput(`[Ginga Player] Using installed executable (${installedVersion ? `v${installedVersion}` : 'current'}): ${storageExec}`);
         return storageExec;
     }
 
     const downloadUrl = await getDownloadUrl();
-    logToOutput(`[Ginga Player] Release executable not found locally. Downloading release from: ${downloadUrl}`);
+    logToOutput(`[Ginga Player] Installed executable is ${storageExec ? 'different from server version' : 'not found'}. Downloading release from: ${downloadUrl}`);
 
     if (!fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
     }
 
-    const zipPath = path.join(storageDir, 'release.zip');
+    const isDeb = process.platform === 'linux' || downloadUrl.endsWith('.deb');
+    const packageFile = isDeb ? 'release.deb' : 'release.zip';
+    const packagePath = path.join(storageDir, packageFile);
 
     let downloadedExec = undefined;
     await vscode.window.withProgress({
@@ -278,18 +391,23 @@ async function resolveOrDownloadExecutable(context, documentPath) {
         title: 'Downloading Ginga player release...',
         cancellable: false
     }, async () => {
-        downloadedExec = await downloadAndExtract(zipPath, storageDir, downloadUrl);
-        if (fs.existsSync(zipPath)) {
-            fs.unlinkSync(zipPath);
+        downloadedExec = await module.exports.downloadAndExtract(packagePath, storageDir, downloadUrl);
+        if (!isDeb && fs.existsSync(packagePath)) {
+            fs.unlinkSync(packagePath);
         }
     });
 
     if (!downloadedExec) {
-        downloadedExec = getExecutableInStorage(storageDir);
+        downloadedExec = getExecutable(storageDir);
     }
 
     if (downloadedExec && fs.existsSync(downloadedExec)) {
         return downloadedExec;
+    }
+
+    if (isDeb) {
+        logToOutput(`[Ginga Player] Ginga player is not installed yet. Please run: sudo apt install -y "${packagePath}"`);
+        throw new Error(`Ginga player is not installed yet. Please run: sudo apt install -y "${packagePath}"`);
     }
 
     logToOutput(`[Ginga Player] ERROR: Release executable was not found after downloading from ${downloadUrl}`);
@@ -359,9 +477,9 @@ async function checkForUpdate(context) {
         ? ctx.globalStorageUri.fsPath
         : (ctx && ctx.extensionPath ? path.join(ctx.extensionPath, 'bin') : path.join(__dirname, '..', 'bin'));
 
-    const installedVersion = getInstalledVersion(storageDir);
+    const installedVersion = getInstalledVersion(storageDir, true);
     const latestVersion = await getLatestVersion();
-    const updateAvailable = isNewerVersion(latestVersion, installedVersion);
+    const updateAvailable = isDifferentVersion(latestVersion, installedVersion);
 
     if (updateAvailable) {
         const msg = installedVersion
@@ -374,18 +492,24 @@ async function checkForUpdate(context) {
                 fs.mkdirSync(storageDir, { recursive: true });
             }
             const downloadUrl = await getDownloadUrl();
-            const zipPath = path.join(storageDir, 'release.zip');
+            const isDeb = process.platform === 'linux' || downloadUrl.endsWith('.deb');
+            const packageFile = isDeb ? 'release.deb' : 'release.zip';
+            const packagePath = path.join(storageDir, packageFile);
             await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
                 title: `Downloading Ginga player v${latestVersion}...`,
                 cancellable: false
             }, async () => {
-                await downloadAndExtract(zipPath, storageDir, downloadUrl);
-                if (fs.existsSync(zipPath)) {
-                    fs.unlinkSync(zipPath);
+                await module.exports.downloadAndExtract(packagePath, storageDir, downloadUrl);
+                if (!isDeb && fs.existsSync(packagePath)) {
+                    fs.unlinkSync(packagePath);
                 }
             });
-            vscode.window.showInformationMessage(`Ginga player updated to v${latestVersion}.`);
+            if (isDeb) {
+                vscode.window.showInformationMessage(`Ginga player downloaded. Install it with: sudo apt install -y "${packagePath}"`);
+            } else {
+                vscode.window.showInformationMessage(`Ginga player updated to v${latestVersion}.`);
+            }
         }
     } else {
         vscode.window.showInformationMessage(`Ginga player is up to date (version v${installedVersion}).`);
@@ -432,13 +556,18 @@ module.exports = {
     stopPlayer,
     resolveOrDownloadExecutable,
     getExecutableInStorage,
+    getSystemExecutable,
+    getExecutable,
+    getSystemInstalledVersion,
     getInstalledVersion,
     setInstalledVersion,
+    isDifferentVersion,
     isNewerVersion,
     checkForUpdate,
     getLatestVersion,
     getDownloadUrl,
     downloadFile,
     extractZip,
+    runDebInstaller,
     downloadAndExtract
 };
