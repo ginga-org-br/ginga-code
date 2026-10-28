@@ -190,42 +190,245 @@ function getPlatformName() {
     return platformName;
 }
 
-function getLatestVersion() {
+let releaseCache = new Map();
+
+function clearReleaseCache() {
+    releaseCache.clear();
+}
+
+function checkUrlExists(url) {
     return new Promise((resolve) => {
-        const fallbackVersion = '0.3.0';
-        const req = https.get('https://github.com/ginga-org-br/gingaf/releases/latest', {
-            agent: false,
-            headers: { 'User-Agent': 'VSCode-Ginga' }
-        }, (res) => {
-            res.resume();
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                const match = res.headers.location.match(/\/releases\/tag\/v?([^/?#]+)/);
-                if (match && match[1]) {
-                    return resolve(match[1]);
+        try {
+            const parsed = new URL(url);
+            const client = parsed.protocol === 'https:' ? https : http;
+            const req = client.request(url, {
+                method: 'HEAD',
+                agent: false,
+                headers: { 'User-Agent': 'VSCode-Ginga' }
+            }, (res) => {
+                if (res.statusCode >= 200 && res.statusCode < 400) {
+                    resolve(true);
+                } else {
+                    resolve(false);
                 }
+            });
+            req.on('error', () => resolve(false));
+            req.setTimeout(4000, () => {
+                req.destroy();
+                resolve(false);
+            });
+            req.end();
+        } catch (e) {
+            resolve(false);
+        }
+    });
+}
+
+function matchesPlatform(assetName, platform, arch) {
+    const name = assetName.toLowerCase();
+    if (platform === 'win32' || platform === 'windows') {
+        if (!name.endsWith('.zip')) return false;
+        if (!name.includes('win')) return false;
+        if (arch === 'arm64') {
+            return name.includes('arm64');
+        }
+        return name.includes('x64') || name.includes('amd64') || (!name.includes('arm') && !name.includes('x86') && !name.includes('ia32'));
+    }
+    if (platform === 'linux') {
+        if (!name.endsWith('.deb') && !name.includes('linux')) return false;
+        const targetArch = (arch === 'arm64') ? 'arm64' : 'amd64';
+        return name.includes(targetArch) || (!name.includes('arm64') && !name.includes('amd64'));
+    }
+    if (platform === 'darwin' || platform === 'macos') {
+        if (!name.includes('mac') && !name.includes('darwin') && !name.includes('osx')) return false;
+        if (arch === 'arm64' && name.includes('arm64')) return true;
+        if (arch === 'x64' && (name.includes('x64') || name.includes('amd64'))) return true;
+        return !name.includes('x64') && !name.includes('arm64');
+    }
+    return false;
+}
+
+function fetchGithubReleasesApi() {
+    return new Promise((resolve) => {
+        const req = https.get('https://api.github.com/repos/ginga-org-br/gingaf/releases', {
+            agent: false,
+            headers: {
+                'User-Agent': 'VSCode-Ginga',
+                'Accept': 'application/vnd.github.v3+json'
             }
-            resolve(fallbackVersion);
+        }, (res) => {
+            if (res.statusCode !== 200) {
+                res.resume();
+                return resolve(null);
+            }
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (Array.isArray(parsed)) {
+                        return resolve(parsed);
+                    }
+                } catch (e) { }
+                resolve(null);
+            });
         });
-        req.on('error', () => resolve(fallbackVersion));
+        req.on('error', () => resolve(null));
         req.setTimeout(5000, () => {
             req.destroy();
-            resolve(fallbackVersion);
+            resolve(null);
         });
     });
 }
 
-async function getDownloadUrl() {
-    const version = await getLatestVersion();
-    if (process.platform === 'linux') {
-        const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-        return `https://github.com/ginga-org-br/gingaf/releases/download/v${version}/gingaf-v${version}-linux-${arch}.deb`;
+function fetchExpandedAssets(tag) {
+    return new Promise((resolve) => {
+        const cleanTag = tag.startsWith('v') ? tag : `v${tag}`;
+        const url = `https://github.com/ginga-org-br/gingaf/releases/expanded_assets/${cleanTag}`;
+        const req = https.get(url, {
+            agent: false,
+            headers: { 'User-Agent': 'VSCode-Ginga' }
+        }, (res) => {
+            if (res.statusCode !== 200) {
+                res.resume();
+                return resolve([]);
+            }
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                const re = /\/ginga-org-br\/gingaf\/releases\/download\/[^"'\s>]+/g;
+                const matches = [...new Set(data.match(re) || [])];
+                const assets = matches.map(href => {
+                    const fullUrl = `https://github.com${href}`;
+                    const name = href.split('/').pop();
+                    return { name, browser_download_url: fullUrl };
+                });
+                resolve(assets);
+            });
+        });
+        req.on('error', () => resolve([]));
+        req.setTimeout(5000, () => {
+            req.destroy();
+            resolve([]);
+        });
+    });
+}
+
+function fetchReleaseTagsFallback() {
+    return new Promise((resolve) => {
+        const urls = [
+            'https://github.com/ginga-org-br/gingaf/releases.atom',
+            'https://github.com/ginga-org-br/gingaf/releases',
+            'https://github.com/ginga-org-br/gingaf/tags'
+        ];
+        function tryNext(index) {
+            if (index >= urls.length) return resolve([]);
+            const req = https.get(urls[index], {
+                agent: false,
+                headers: { 'User-Agent': 'VSCode-Ginga' }
+            }, (res) => {
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    return tryNext(index + 1);
+                }
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    const tags = [...data.matchAll(/\/releases\/tag\/v?([^"'\s<]+)/g)].map(m => m[1]);
+                    const unique = [...new Set(tags)];
+                    if (unique.length > 0) {
+                        return resolve(unique);
+                    }
+                    tryNext(index + 1);
+                });
+            });
+            req.on('error', () => tryNext(index + 1));
+            req.setTimeout(5000, () => {
+                req.destroy();
+                tryNext(index + 1);
+            });
+        }
+        tryNext(0);
+    });
+}
+
+async function getLatestRelease(platform = process.platform, arch = process.arch) {
+    const cacheKey = `${platform}_${arch}`;
+    if (releaseCache.has(cacheKey)) {
+        return releaseCache.get(cacheKey);
     }
-    if (process.platform === 'darwin') {
-        return `https://github.com/ginga-org-br/gingaf/releases/download/v${version}/gingaf-v${version}-macos.zip`;
+
+    let result = null;
+    const releases = await fetchGithubReleasesApi();
+    if (releases && releases.length > 0) {
+        for (const rel of releases) {
+            const version = rel.tag_name ? rel.tag_name.replace(/^v/, '').trim() : '';
+            if (!version || !rel.assets || !Array.isArray(rel.assets)) continue;
+            const matchingAsset = rel.assets.find(a => matchesPlatform(a.name, platform, arch));
+            if (matchingAsset && matchingAsset.browser_download_url) {
+                result = {
+                    version,
+                    downloadUrl: matchingAsset.browser_download_url,
+                    assetName: matchingAsset.name
+                };
+                break;
+            }
+        }
     }
-    const platformName = getPlatformName();
-    const zipName = `gingaf-v${version}-${platformName}.zip`;
-    return `https://github.com/ginga-org-br/gingaf/releases/download/v${version}/${zipName}`;
+
+    if (!result) {
+        const tags = await fetchReleaseTagsFallback();
+        for (const v of tags) {
+            const assets = await fetchExpandedAssets(v);
+            const matchingAsset = assets.find(a => matchesPlatform(a.name, platform, arch));
+            if (matchingAsset && matchingAsset.browser_download_url) {
+                result = {
+                    version: v,
+                    downloadUrl: matchingAsset.browser_download_url,
+                    assetName: matchingAsset.name
+                };
+                break;
+            }
+
+            let candidateUrl;
+            let candidateAsset;
+            if (platform === 'win32' || platform === 'windows') {
+                candidateAsset = `gingaf-v${v}-windows-x64.zip`;
+                candidateUrl = `https://github.com/ginga-org-br/gingaf/releases/download/v${v}/${candidateAsset}`;
+            } else if (platform === 'linux') {
+                const targetArch = arch === 'arm64' ? 'arm64' : 'amd64';
+                candidateAsset = `gingaf-v${v}-linux-${targetArch}.deb`;
+                candidateUrl = `https://github.com/ginga-org-br/gingaf/releases/download/v${v}/${candidateAsset}`;
+            } else {
+                candidateAsset = `gingaf-v${v}-macos.zip`;
+                candidateUrl = `https://github.com/ginga-org-br/gingaf/releases/download/v${v}/${candidateAsset}`;
+            }
+
+            if (await checkUrlExists(candidateUrl)) {
+                result = {
+                    version: v,
+                    downloadUrl: candidateUrl,
+                    assetName: candidateAsset
+                };
+                break;
+            }
+        }
+    }
+
+    if (result) {
+        releaseCache.set(cacheKey, result);
+    }
+    return result;
+}
+
+async function getLatestVersion(platform = process.platform, arch = process.arch) {
+    const rel = await getLatestRelease(platform, arch);
+    return rel ? rel.version : undefined;
+}
+
+async function getDownloadUrl(platform = process.platform, arch = process.arch) {
+    const rel = await getLatestRelease(platform, arch);
+    return rel ? rel.downloadUrl : undefined;
 }
 
 function downloadFile(url, destPath) {
@@ -310,8 +513,8 @@ async function downloadAndExtract(packagePath, storageDir, url) {
     await downloadFile(downloadUrl, packagePath);
 
     const isDeb = (downloadUrl && downloadUrl.endsWith('.deb')) ||
-                  (packagePath && packagePath.endsWith('.deb')) ||
-                  process.platform === 'linux';
+        (packagePath && packagePath.endsWith('.deb')) ||
+        process.platform === 'linux';
 
     if (isDeb) {
         runDebInstaller(packagePath);
@@ -566,6 +769,10 @@ module.exports = {
     checkForUpdate,
     getLatestVersion,
     getDownloadUrl,
+    getLatestRelease,
+    clearReleaseCache,
+    fetchExpandedAssets,
+    fetchReleaseTagsFallback,
     downloadFile,
     extractZip,
     runDebInstaller,

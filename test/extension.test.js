@@ -252,4 +252,46 @@ test('resolveOrDownloadExecutable re-downloads when installed version differs fr
     }
 });
 
+test('getDownloadUrl resolves latest available Windows zip release (v0.2.0)', async () => {
+    const downloadUrl = await extension.getDownloadUrl('win32', 'x64');
+    assert.strictEqual(downloadUrl, 'https://github.com/ginga-org-br/gingaf/releases/download/v0.2.0/gingaf-v0.2.0-windows-x64.zip');
+    const version = await extension.getLatestVersion('win32', 'x64');
+    assert.strictEqual(version, '0.2.0');
+});
+
+test('getDownloadUrl resolves latest available Linux deb release (v0.3.0)', async () => {
+    const downloadUrl = await extension.getDownloadUrl('linux', 'x64');
+    assert.strictEqual(downloadUrl, 'https://github.com/ginga-org-br/gingaf/releases/download/v0.3.0/gingaf-v0.3.0-linux-amd64.deb');
+    const version = await extension.getLatestVersion('linux', 'x64');
+    assert.strictEqual(version, '0.3.0');
+});
+
+test('getLatestRelease returns structured release information and uses cache', async () => {
+    extension.clearReleaseCache();
+    const release = await extension.getLatestRelease('win32', 'x64');
+    assert.strictEqual(release.version, '0.2.0');
+    assert.strictEqual(release.assetName, 'gingaf-v0.2.0-windows-x64.zip');
+    assert.strictEqual(release.downloadUrl, 'https://github.com/ginga-org-br/gingaf/releases/download/v0.2.0/gingaf-v0.2.0-windows-x64.zip');
+
+    const cached = await extension.getLatestRelease('win32', 'x64');
+    assert.strictEqual(cached, release);
+});
+
+test('fetchReleaseTagsFallback dynamically retrieves tags from release feeds', async () => {
+    const tags = await extension.fetchReleaseTagsFallback();
+    assert.ok(Array.isArray(tags));
+    assert.ok(tags.length > 0);
+    assert.ok(tags.includes('0.2.0'));
+});
+
+test('fetchExpandedAssets dynamically discovers assets for given tag', async () => {
+    const assets02 = await extension.fetchExpandedAssets('0.2.0');
+    assert.ok(Array.isArray(assets02));
+    const winZip = assets02.find(a => a.name.includes('windows'));
+    assert.ok(winZip);
+    assert.ok(winZip.browser_download_url.endsWith('.zip'));
+});
+
+
+
 

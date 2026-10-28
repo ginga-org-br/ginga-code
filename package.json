@@ -2,7 +2,7 @@
     "name": "ginga-code",
     "displayName": "Ginga Code",
     "description": "VS Code extension for execution of Ginga application",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "publisher": "ginga-org-br",
     "icon": "ginga-logo.png",
     "repository": {

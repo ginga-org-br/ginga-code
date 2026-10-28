@@ -18,7 +18,7 @@ deps:
 	npm install --no-audit --no-fund
 
 build:
-	npx @vscode/vsce package
+	npx --yes @vscode/vsce package
 
 
 test:
@@ -31,8 +31,7 @@ clean:
 CODE_CMD ?= code
 
 run-vscode-with-extension-only: build
-	mkdir -p .vscode-test/user/User .vscode-test/user/User/globalStorage
-	node -e "const fs = require('fs'); const sFile = '.vscode-test/user/User/settings.json'; const curS = fs.existsSync(sFile) ? JSON.parse(fs.readFileSync(sFile, 'utf8')) : {}; curS['window.newWindowDimensions'] = 'default'; fs.writeFileSync(sFile, JSON.stringify(curS, null, 2)); const stFile = '.vscode-test/user/User/globalStorage/storage.json'; if (fs.existsSync(stFile)) { try { const st = JSON.parse(fs.readFileSync(stFile, 'utf8')); } catch (e) {} }"
+	node -e "const fs = require('fs'); fs.mkdirSync('.vscode-test/user/User/globalStorage', { recursive: true }); const sFile = '.vscode-test/user/User/settings.json'; const curS = fs.existsSync(sFile) ? JSON.parse(fs.readFileSync(sFile, 'utf8')) : {}; curS['window.newWindowDimensions'] = 'default'; fs.writeFileSync(sFile, JSON.stringify(curS, null, 2)); const stFile = '.vscode-test/user/User/globalStorage/storage.json'; if (fs.existsSync(stFile)) { try { const st = JSON.parse(fs.readFileSync(stFile, 'utf8')); } catch (e) {} }"
 	rm -rf .vscode-test/exts
 	rm -rf .vscode-test/user/User/globalStorage/ginga-org-br.ginga-code
 	node -e "const cp = require('child_process'); const fs = require('fs'); const vsix = fs.readdirSync('.').find(f => f.endsWith('.vsix')); cp.spawnSync('$(CODE_CMD)', ['--extensions-dir=.vscode-test/exts', '--install-extension', vsix], { stdio: 'inherit', shell: true });"
