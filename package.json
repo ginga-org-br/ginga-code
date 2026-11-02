@@ -17,12 +17,19 @@
         "Other"
     ],
     "main": "./src/extension.js",
+    "capabilities": {
+        "untrustedWorkspaces": {
+            "supported": true
+        }
+    },
     "activationEvents": [
         "onLanguage:xml",
         "onLanguage:ncl",
         "onLanguage:html",
         "onCommand:ginga.openPlayer",
+        "onCommand:ginga.debugPlayer",
         "onCommand:ginga.checkForUpdate",
+        "onDebug",
         "workspaceContains:**/*.ncl",
         "workspaceContains:**/*.html",
         "onStartupFinished"
@@ -30,9 +37,20 @@
     "contributes": {
         "languages": [
             {
-                "id": "xml",
+                "id": "ncl",
                 "extensions": [
                     ".ncl"
+                ],
+                "aliases": [
+                    "NCL",
+                    "Nested Context Language"
+                ],
+                "configuration": "./languages/ncl-language-configuration.json"
+            },
+            {
+                "id": "xml",
+                "extensions": [
+                    ".xml"
                 ]
             },
             {
@@ -49,6 +67,21 @@
                 "icon": "$(play)"
             },
             {
+                "command": "ginga.stopPlayer",
+                "title": "Stop Ginga Application",
+                "icon": "$(stop-circle)"
+            },
+            {
+                "command": "ginga.restartPlayer",
+                "title": "Restart Ginga Application",
+                "icon": "$(sync)"
+            },
+            {
+                "command": "ginga.debugPlayer",
+                "title": "Debug Ginga Application",
+                "icon": "$(debug-alt)"
+            },
+            {
                 "command": "ginga.checkForUpdate",
                 "title": "Check for Ginga Player Updates",
                 "category": "Ginga"
@@ -58,25 +91,183 @@
             "editor/title": [
                 {
                     "command": "ginga.openPlayer",
-                    "when": "editorLangId == xml || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.debugPlayer",
+                    "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
                     "group": "navigation"
                 }
             ],
             "editor/context": [
                 {
                     "command": "ginga.openPlayer",
-                    "when": "editorLangId == xml || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.stopPlayer",
+                    "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.restartPlayer",
+                    "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.debugPlayer",
+                    "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                }
+            ],
+            "explorer/context": [
+                {
+                    "command": "ginga.openPlayer",
+                    "when": "resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.stopPlayer",
+                    "when": "resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.restartPlayer",
+                    "when": "resourceExtname == .ncl || resourceExtname == .html",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ginga.debugPlayer",
+                    "when": "resourceExtname == .ncl || resourceExtname == .html",
                     "group": "navigation"
                 }
             ]
         },
+        "keybindings": [
+            {
+                "command": "ginga.openPlayer",
+                "key": "ctrl+f5",
+                "mac": "cmd+f5",
+                "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html"
+            },
+            {
+                "command": "ginga.stopPlayer",
+                "key": "shift+f5",
+                "mac": "shift+f5",
+                "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html"
+            },
+            {
+                "command": "ginga.restartPlayer",
+                "key": "ctrl+shift+f5",
+                "mac": "cmd+shift+f5",
+                "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html"
+            },
+            {
+                "command": "ginga.debugPlayer",
+                "key": "f5",
+                "mac": "f5",
+                "when": "editorLangId == xml || editorLangId == ncl || editorLangId == html || resourceExtname == .ncl || resourceExtname == .html"
+            }
+        ],
+        "breakpoints": [
+            {
+                "language": "ncl"
+            },
+            {
+                "language": "xml"
+            },
+            {
+                "language": "html"
+            },
+            {
+                "language": "lua"
+            }
+        ],
+        "debuggers": [
+            {
+                "type": "ginga",
+                "label": "Ginga Debug",
+                "languages": [
+                    "ncl",
+                    "xml",
+                    "html"
+                ],
+                "initialConfigurations": [
+                    {
+                        "type": "ginga",
+                        "request": "launch",
+                        "name": "Debug Ginga Application",
+                        "program": "${file}"
+                    }
+                ],
+                "configurationSnippets": [
+                    {
+                        "label": "Ginga: Debug Current NCL Document",
+                        "description": "Start Ginga debugging mode for the active document",
+                        "body": {
+                            "type": "ginga",
+                            "request": "launch",
+                            "name": "Debug Ginga Application",
+                            "program": "^\"\\${file}\""
+                        }
+                    }
+                ],
+                "configurationAttributes": {
+                    "launch": {
+                        "required": [
+                            "program"
+                        ],
+                        "properties": {
+                            "program": {
+                                "type": "string",
+                                "description": "Path to the NCL or HTML application file to debug."
+                            },
+                            "gingafArgs": {
+                                "type": [
+                                    "array",
+                                    "string"
+                                ],
+                                "description": "Custom arguments to pass to the player."
+                            },
+                            "stopOnEntry": {
+                                "type": "boolean",
+                                "description": "Automatically pause execution at the first line or breakpoint.",
+                                "default": true
+                            }
+                        }
+                    }
+                }
+            }
+        ],
         "configuration": {
             "title": "Ginga Configuration",
             "properties": {
-                "vscode.gingafExePath": {
+                "ginga.executablePath": {
                     "type": "string",
                     "default": "",
                     "description": "Absolute path to the Ginga player (gingaf) executable."
+                },
+                "vscode.gingafArgs": {
+                    "type": [
+                        "array",
+                        "string"
+                    ],
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Additional command-line arguments to pass to the Ginga player (gingaf) executable."
+                },
+                "vscode.gingafWorkingDirectory": {
+                    "type": "string",
+                    "enum": [
+                        "appDirectory",
+                        "workspaceRoot"
+                    ],
+                    "default": "appDirectory",
+                    "description": "Working directory used when launching the Ginga player process."
                 }
             }
         }

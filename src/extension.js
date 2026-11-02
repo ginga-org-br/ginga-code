@@ -3,57 +3,220 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const cp = require('child_process');
+const {
+    GingaDebugSession,
+    GingaDebugAdapter,
+    GingaConfigurationProvider,
+    GingaDebugAdapterDescriptorFactory,
+    setVsCode
+} = require('./debugAdapter.js');
 
 let vscode;
+let mockConfigurations = {};
 try {
     vscode = require('vscode');
 } catch (e) {
     vscode = {
+        EventEmitter: class {
+            constructor() {
+                this._listeners = [];
+                this.event = (listener) => {
+                    this._listeners.push(listener);
+                    return {
+                        dispose: () => {
+                            const idx = this._listeners.indexOf(listener);
+                            if (idx !== -1) this._listeners.splice(idx, 1);
+                        }
+                    };
+                };
+            }
+            fire(data) {
+                for (const l of [...this._listeners]) {
+                    try { l(data); } catch (_) {}
+                }
+            }
+            dispose() {
+                this._listeners = [];
+            }
+        },
+        DebugAdapterInlineImplementation: class {
+            constructor(implementation) {
+                this.implementation = implementation;
+            }
+        },
         ProgressLocation: {
             Notification: 15
+        },
+        StatusBarAlignment: {
+            Left: 1,
+            Right: 2
         },
         window: {
             activeTextEditor: {
                 document: {
                     fileName: 'sample.ncl',
-                    getText: () => '<ncl></ncl>'
+                    getText: () => '<ncl></ncl>',
+                    isDirty: false,
+                    save: async () => true
                 }
             },
             onDidChangeActiveTextEditor: () => ({ dispose: () => { } }),
             showInformationMessage: () => { },
             showWarningMessage: () => { },
             showErrorMessage: () => { },
-            createOutputChannel: () => ({
-                appendLine: () => { },
-                show: () => { },
-                dispose: () => { }
-            }),
+            createOutputChannel: (name) => {
+                const channel = {
+                    name,
+                    content: '',
+                    append: (chunk) => { channel.content += chunk; },
+                    appendLine: (line) => { channel.content += line + '\n'; },
+                    show: () => { },
+                    dispose: () => { channel.content = ''; }
+                };
+                return channel;
+            },
+            createStatusBarItem: (alignment, priority) => {
+                const item = {
+                    alignment,
+                    priority,
+                    text: '',
+                    tooltip: '',
+                    command: '',
+                    visible: false,
+                    show: () => { item.visible = true; },
+                    hide: () => { item.visible = false; },
+                    dispose: () => { item.visible = false; }
+                };
+                return item;
+            },
             withProgress: async (options, task) => {
                 return await task();
             }
         },
         workspace: {
-            getConfiguration: () => ({
-                get: () => ''
+            workspaceFolders: undefined,
+            getConfiguration: (section) => ({
+                get: (key, defaultValue) => {
+                    const fullKey = section ? `${section}.${key}` : key;
+                    if (mockConfigurations && fullKey in mockConfigurations) return mockConfigurations[fullKey];
+                    if (mockConfigurations && key in mockConfigurations) return mockConfigurations[key];
+                    return defaultValue !== undefined ? defaultValue : '';
+                },
+                update: (key, value) => {
+                    const fullKey = section ? `${section}.${key}` : key;
+                    if (!mockConfigurations) mockConfigurations = {};
+                    mockConfigurations[fullKey] = value;
+                    mockConfigurations[key] = value;
+                }
             })
+        },
+        debug: {
+            breakpoints: [],
+            registerDebugConfigurationProvider: (type, provider) => {
+                vscode.debug._provider = provider;
+                return { type, provider, dispose: () => { } };
+            },
+            registerDebugAdapterDescriptorFactory: (type, factory) => {
+                vscode.debug._factory = factory;
+                return { type, factory, dispose: () => { } };
+            },
+            startDebugging: async (folder, config) => true,
+            stopDebugging: async (session) => true,
+            onDidTerminateDebugSession: (cb) => ({ dispose: () => { } })
         },
         commands: {
             registerCommand: (name, cb) => ({ name, cb })
         }
     };
 }
+setVsCode(vscode);
 
 let lastActiveEditor = undefined;
 let extensionContext = undefined;
 let outputChannel = undefined;
 let activePlayerProcess = undefined;
+let playerStatusBarItem = undefined;
+const activeDebugSessions = new Set();
+
+function getActiveDebugSessions() {
+    return Array.from(activeDebugSessions);
+}
+
+function wireDebugSession(session) {
+    if (!session) return;
+    activeDebugSessions.add(session);
+    if (activePlayerProcess) {
+        session.hasPlayer = true;
+    }
+    session.onContinue = () => {
+        if (activePlayerProcess && activePlayerProcess.stdin && !activePlayerProcess.stdin.destroyed) {
+            try {
+                activePlayerProcess.stdin.write('continue\n');
+            } catch (_) {}
+        }
+    };
+    session.onPause = () => {
+        if (activePlayerProcess && activePlayerProcess.stdin && !activePlayerProcess.stdin.destroyed) {
+            try {
+                activePlayerProcess.stdin.write('pause\n');
+            } catch (_) {}
+        }
+    };
+    session.onStep = () => {
+        if (activePlayerProcess && activePlayerProcess.stdin && !activePlayerProcess.stdin.destroyed) {
+            try {
+                activePlayerProcess.stdin.write('forward\n');
+            } catch (_) {}
+        }
+    };
+    session.onRestart = () => {
+        if (activePlayerProcess && activePlayerProcess.stdin && !activePlayerProcess.stdin.destroyed) {
+            try {
+                activePlayerProcess.stdin.write('continue\n');
+            } catch (_) {}
+        }
+    };
+    session.onSetBreakpoints = (lines) => {
+        if (activePlayerProcess && activePlayerProcess.stdin && !activePlayerProcess.stdin.destroyed) {
+            try {
+                activePlayerProcess.stdin.write(`bp ${lines.join(' ')}\n`);
+            } catch (_) {}
+        }
+    };
+}
 
 function stopPlayer() {
     if (activePlayerProcess) {
         try {
+            if (activePlayerProcess.stdin && !activePlayerProcess.stdin.destroyed) {
+                try {
+                    activePlayerProcess.stdin.end();
+                } catch (_) {}
+            }
+            if (activePlayerProcess.stdout && typeof activePlayerProcess.stdout.removeAllListeners === 'function') {
+                activePlayerProcess.stdout.removeAllListeners('data');
+            }
+            if (activePlayerProcess.stderr && typeof activePlayerProcess.stderr.removeAllListeners === 'function') {
+                activePlayerProcess.stderr.removeAllListeners('data');
+            }
             activePlayerProcess.kill();
         } catch (e) { }
         activePlayerProcess = undefined;
+    }
+    if (playerStatusBarItem) {
+        playerStatusBarItem.hide();
+    }
+    for (const session of activeDebugSessions) {
+        try {
+            session.hasPlayer = false;
+            session.terminate(0);
+        } catch (_) {}
+    }
+    activeDebugSessions.clear();
+    if (vscode && vscode.debug && typeof vscode.debug.stopDebugging === 'function') {
+        try {
+            vscode.debug.stopDebugging();
+        } catch (_) {}
     }
 }
 
@@ -549,8 +712,8 @@ async function downloadAndExtract(packagePath, storageDir, url) {
 async function resolveOrDownloadExecutable(context, documentPath) {
     logToOutput(`[Ginga Player] Resolving executable for document: ${documentPath}`);
 
-    const userConfig = vscode.workspace.getConfiguration('vscode');
-    const configuredPath = (userConfig.get('gingafExePath') || userConfig.get('gingafExecutable') || '').trim();
+    const userConfig = vscode.workspace.getConfiguration('ginga');
+    const configuredPath = (userConfig.get('executablePath') || vscode.workspace.getConfiguration().get('ginga.executablePath') || '').trim();
     if (configuredPath && fs.existsSync(configuredPath)) {
         logToOutput(`[Ginga Player] Using configured executable path: ${configuredPath}`);
         return configuredPath;
@@ -637,6 +800,11 @@ async function openPlayer(context, targetUri) {
         return;
     }
 
+    const activeEditor = vscode.window.activeTextEditor || lastActiveEditor;
+    if (activeEditor && activeEditor.document && activeEditor.document.isDirty && typeof activeEditor.document.save === 'function') {
+        await activeEditor.document.save();
+    }
+
     let executable;
     try {
         executable = await resolveOrDownloadExecutable(context, documentPath);
@@ -650,28 +818,241 @@ async function openPlayer(context, targetUri) {
     }
 
     try {
-        const spawnEnv = Object.assign({}, process.env, { APP: documentPath });
-        const child = cp.spawn(executable, [documentPath], {
+        const config = vscode.workspace.getConfiguration();
+        const configuredArgs = config.get('vscode.gingafArgs', []);
+        const extraArgs = parseArgs(configuredArgs);
+        const configuredCwd = config.get('vscode.gingafWorkingDirectory', 'appDirectory');
+        let workingDir;
+        if (configuredCwd === 'workspaceRoot') {
+            const workspaceFolder = vscode.workspace && vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0] && vscode.workspace.workspaceFolders[0].uri ? vscode.workspace.workspaceFolders[0].uri.fsPath : undefined;
+            workingDir = workspaceFolder || path.dirname(documentPath);
+        } else {
+            workingDir = path.dirname(documentPath);
+        }
+        const breakpointLines = [];
+        if (vscode.debug && Array.isArray(vscode.debug.breakpoints)) {
+            for (const bp of vscode.debug.breakpoints) {
+                if (bp && bp.location && bp.location.uri && bp.location.range) {
+                    const bpPath = bp.location.uri.fsPath || bp.location.uri.path;
+                    if (bpPath === documentPath || path.resolve(bpPath) === path.resolve(documentPath)) {
+                        const line = (bp.location.range.start ? bp.location.range.start.line : bp.location.range.line || 0) + 1;
+                        if (line > 0 && !breakpointLines.includes(line)) {
+                            breakpointLines.push(line);
+                        }
+                    }
+                }
+            }
+        }
+        for (const session of activeDebugSessions) {
+            if (typeof session.getBreakpoints === 'function') {
+                const sessionBps = session.getBreakpoints(documentPath);
+                for (const line of sessionBps) {
+                    if (!breakpointLines.includes(line)) {
+                        breakpointLines.push(line);
+                    }
+                }
+            }
+        }
+        const bpArgs = breakpointLines.length > 0 ? [`--breakpoints=${breakpointLines.join(',')}`] : [];
+        const spawnArgs = [...extraArgs, ...bpArgs, documentPath];
+        const spawnEnv = Object.assign({
+            DISPLAY: process.env.DISPLAY || ':0'
+        }, process.env, {
+            APP: documentPath,
+            ...(breakpointLines.length > 0 ? { GINGA_BREAKPOINTS: breakpointLines.join(',') } : {})
+        });
+        const startTime = Date.now();
+        const child = cp.spawn(executable, spawnArgs, {
             detached: true,
-            stdio: 'ignore',
-            cwd: path.dirname(executable),
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: workingDir,
             env: spawnEnv
         });
         activePlayerProcess = child;
-        child.on('exit', () => {
+        if (child.stdin && typeof child.stdin.on === 'function') {
+            child.stdin.on('error', () => {});
+        }
+        for (const session of activeDebugSessions) {
+            wireDebugSession(session);
+        }
+        if (playerStatusBarItem) {
+            playerStatusBarItem.show();
+        }
+        if (child.stdout && typeof child.stdout.on === 'function') {
+            let stdoutBuffer = '';
+            child.stdout.on('data', (chunk) => {
+                const text = chunk.toString();
+                const channel = getOutputChannel();
+                channel.append(text);
+
+                stdoutBuffer += text;
+                const lines = stdoutBuffer.split('\n');
+                stdoutBuffer = lines.pop();
+
+                for (const line of lines) {
+                    const match = line.match(/\[Breakpoint\].*?at line\s+(\d+)/);
+                    if (match) {
+                        const bpLine = parseInt(match[1], 10);
+                        for (const session of activeDebugSessions) {
+                            if (typeof session.notifyStopped === 'function') {
+                                session.notifyStopped(bpLine, 'breakpoint');
+                            }
+                        }
+                    }
+                }
+            });
+            if (typeof child.stdout.unref === 'function') {
+                child.stdout.unref();
+            }
+        }
+        if (child.stderr && typeof child.stderr.on === 'function') {
+            child.stderr.on('data', (chunk) => {
+                const channel = getOutputChannel();
+                channel.append(chunk.toString());
+            });
+            if (typeof child.stderr.unref === 'function') {
+                child.stderr.unref();
+            }
+        }
+        child.on('exit', (code, signal) => {
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            const channel = getOutputChannel();
+            if (signal) {
+                channel.appendLine(`[Ginga Player] Process terminated by signal ${signal} (duration: ${elapsed}s)`);
+            } else {
+                channel.appendLine(`[Ginga Player] Process exited with code ${code !== null && code !== undefined ? code : 0} (duration: ${elapsed}s)`);
+            }
+            if (code !== 0 && code !== null && code !== undefined) {
+                vscode.window.showWarningMessage(`Ginga player process exited with code ${code}.`);
+            }
+            if (child.stdout && typeof child.stdout.removeAllListeners === 'function') {
+                child.stdout.removeAllListeners('data');
+            }
+            if (child.stderr && typeof child.stderr.removeAllListeners === 'function') {
+                child.stderr.removeAllListeners('data');
+            }
             if (activePlayerProcess === child) {
                 activePlayerProcess = undefined;
             }
+            if (playerStatusBarItem) {
+                playerStatusBarItem.hide();
+            }
+            const exitCode = code !== null && code !== undefined ? code : 0;
+            for (const session of activeDebugSessions) {
+                try {
+                    session.hasPlayer = false;
+                    session.terminate(exitCode);
+                } catch (_) {}
+            }
+            activeDebugSessions.clear();
+            if (vscode && vscode.debug && typeof vscode.debug.stopDebugging === 'function') {
+                try {
+                    vscode.debug.stopDebugging();
+                } catch (_) {}
+            }
         });
         child.on('error', (err) => {
+            if (playerStatusBarItem) {
+                playerStatusBarItem.hide();
+            }
+            if (activePlayerProcess === child) {
+                activePlayerProcess = undefined;
+            }
+            for (const session of activeDebugSessions) {
+                try {
+                    session.hasPlayer = false;
+                    session.terminate(1);
+                } catch (_) {}
+            }
+            activeDebugSessions.clear();
+            if (vscode && vscode.debug && typeof vscode.debug.stopDebugging === 'function') {
+                try {
+                    vscode.debug.stopDebugging();
+                } catch (_) {}
+            }
             vscode.window.showErrorMessage(`Ginga player process error: ${err.message}`);
         });
         child.unref();
         vscode.window.showInformationMessage(`Started Ginga player for: ${path.basename(documentPath)}`);
         return child;
     } catch (err) {
+        if (playerStatusBarItem) {
+            playerStatusBarItem.hide();
+        }
         vscode.window.showErrorMessage(`Failed to start Ginga player: ${err.message}`);
     }
+}
+
+function parseArgs(argsInput) {
+    if (Array.isArray(argsInput)) {
+        return argsInput.filter(arg => typeof arg === 'string' && arg.length > 0);
+    }
+    if (typeof argsInput === 'string' && argsInput.trim().length > 0) {
+        const matches = argsInput.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+        if (!matches) return [];
+        return matches.map(token => {
+            if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+                return token.slice(1, -1);
+            }
+            return token;
+        });
+    }
+    return [];
+}
+
+async function restartPlayer(context, targetUri) {
+    stopPlayer();
+    return await openPlayer(context, targetUri);
+}
+
+function isGingaApplication(doc) {
+    if (!doc) return false;
+    const lang = doc.languageId;
+    const name = doc.fileName || '';
+    return lang === 'xml' || lang === 'ncl' || lang === 'html' || name.endsWith('.ncl') || name.endsWith('.html');
+}
+
+async function debugPlayer(context, targetUri) {
+    let documentPath;
+    if (targetUri && targetUri.fsPath) {
+        documentPath = targetUri.fsPath;
+    } else {
+        const activeEditor = vscode.window.activeTextEditor || lastActiveEditor;
+        if (activeEditor && activeEditor.document) {
+            documentPath = activeEditor.document.fileName;
+        }
+    }
+
+    if (!documentPath) {
+        vscode.window.showWarningMessage('No active editor open or document path found.');
+        return;
+    }
+
+    const activeEditor = vscode.window.activeTextEditor || lastActiveEditor;
+    if (activeEditor && activeEditor.document && activeEditor.document.isDirty && typeof activeEditor.document.save === 'function') {
+        await activeEditor.document.save();
+    }
+
+    const config = vscode.workspace.getConfiguration();
+    const gingafArgs = config.get('vscode.gingafArgs', []);
+    const folder = (vscode.workspace && vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0)
+        ? vscode.workspace.workspaceFolders[0]
+        : undefined;
+
+    if (!activePlayerProcess) {
+        try {
+            const uriToOpen = targetUri || (activeEditor && activeEditor.document && activeEditor.document.uri ? activeEditor.document.uri : { fsPath: documentPath });
+            await openPlayer(context, uriToOpen);
+        } catch (_) {}
+    }
+
+    return await vscode.debug.startDebugging(folder, {
+        type: 'ginga',
+        name: 'Debug Ginga Application',
+        request: 'launch',
+        program: documentPath,
+        gingafArgs
+    });
 }
 
 async function checkForUpdate(context) {
@@ -728,35 +1109,134 @@ async function checkForUpdate(context) {
 function activate(context) {
     extensionContext = context;
     const initialEditor = vscode.window.activeTextEditor;
-    if (initialEditor && (initialEditor.document.languageId === 'xml' || initialEditor.document.fileName.endsWith('.ncl') || initialEditor.document.fileName.endsWith('.html'))) {
+    if (initialEditor && isGingaApplication(initialEditor.document)) {
         lastActiveEditor = initialEditor;
     }
 
     const changeEditorSub = vscode.window.onDidChangeActiveTextEditor(editor => {
-        if (editor && (editor.document.languageId === 'xml' || editor.document.fileName.endsWith('.ncl') || editor.document.fileName.endsWith('.html'))) {
+        if (editor && isGingaApplication(editor.document)) {
             lastActiveEditor = editor;
         }
     });
 
     const openPlayerCmd = vscode.commands.registerCommand('ginga.openPlayer', (uri) => openPlayer(context, uri));
+    const stopPlayerCmd = vscode.commands.registerCommand('ginga.stopPlayer', () => stopPlayer());
+    const restartPlayerCmd = vscode.commands.registerCommand('ginga.restartPlayer', (uri) => restartPlayer(context, uri));
+    const debugPlayerCmd = vscode.commands.registerCommand('ginga.debugPlayer', (uri) => debugPlayer(context, uri));
     const checkUpdateCmd = vscode.commands.registerCommand('ginga.checkForUpdate', () => checkForUpdate(context));
 
-    context.subscriptions.push(changeEditorSub, openPlayerCmd, checkUpdateCmd);
+    const configProvider = new GingaConfigurationProvider();
+    const configProviderSub = vscode.debug.registerDebugConfigurationProvider('ginga', configProvider);
+
+    const descriptorFactory = new GingaDebugAdapterDescriptorFactory(() => {
+        const session = new GingaDebugSession();
+        activeDebugSessions.add(session);
+        wireDebugSession(session);
+        session.onLaunch = async (program, args) => {
+            if (!activePlayerProcess && program) {
+                try {
+                    const docUri = vscode.Uri && typeof vscode.Uri.file === 'function'
+                        ? vscode.Uri.file(program)
+                        : { fsPath: program };
+                    await openPlayer(context, docUri);
+                } catch (_) {}
+            }
+            if (activePlayerProcess) {
+                wireDebugSession(session);
+            }
+        };
+        session.onDisconnect = () => {
+            activeDebugSessions.delete(session);
+            stopPlayer();
+        };
+        return session;
+    });
+    const descriptorFactorySub = vscode.debug.registerDebugAdapterDescriptorFactory('ginga', descriptorFactory);
+
+    let onDidTerminateDebugSub;
+    if (vscode.debug && typeof vscode.debug.onDidTerminateDebugSession === 'function') {
+        onDidTerminateDebugSub = vscode.debug.onDidTerminateDebugSession((session) => {
+            if (session && session.type === 'ginga') {
+                stopPlayer();
+            }
+        });
+    }
+
+    playerStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment ? vscode.StatusBarAlignment.Right : 2, 100);
+    playerStatusBarItem.text = '$(stop-circle) Ginga Player';
+    playerStatusBarItem.command = 'ginga.stopPlayer';
+    playerStatusBarItem.tooltip = 'Ginga Player is running (click to stop)';
+    context.subscriptions.push(
+        changeEditorSub,
+        openPlayerCmd,
+        stopPlayerCmd,
+        restartPlayerCmd,
+        debugPlayerCmd,
+        checkUpdateCmd,
+        configProviderSub,
+        descriptorFactorySub,
+        playerStatusBarItem
+    );
+    if (onDidTerminateDebugSub) {
+        context.subscriptions.push(onDidTerminateDebugSub);
+    }
+
+    if (process.env.GINGA_RECORD_BEHAVIOR === 'stopPlayer') {
+        setTimeout(async () => {
+            try {
+                await vscode.commands.executeCommand('ginga.openPlayer');
+                setTimeout(async () => {
+                    try {
+                        await vscode.commands.executeCommand('ginga.stopPlayer');
+                        setTimeout(async () => {
+                            await vscode.commands.executeCommand('workbench.action.quit');
+                        }, 2000);
+                    } catch (e) { }
+                }, 3000);
+            } catch (e) { }
+        }, 2000);
+    }
 }
 
 function deactivate() {
     stopPlayer();
+    if (playerStatusBarItem) {
+        playerStatusBarItem.dispose();
+        playerStatusBarItem = undefined;
+    }
     if (outputChannel) {
         outputChannel.dispose();
         outputChannel = undefined;
     }
 }
 
+function getStatusBarItem() {
+    return playerStatusBarItem;
+}
+
+function getActivePlayerProcess() {
+    return activePlayerProcess;
+}
+
 module.exports = {
+    vscode,
     activate,
     deactivate,
     openPlayer,
     stopPlayer,
+    restartPlayer,
+    debugPlayer,
+    parseArgs,
+    isGingaApplication,
+    isGingaDocument: isGingaApplication,
+    GingaDebugSession,
+    GingaDebugAdapter,
+    GingaConfigurationProvider,
+    GingaDebugAdapterDescriptorFactory,
+    getStatusBarItem,
+    getActivePlayerProcess,
+    getActiveDebugSessions,
+    getOutputChannel,
     resolveOrDownloadExecutable,
     getExecutableInStorage,
     getSystemExecutable,
@@ -776,5 +1256,6 @@ module.exports = {
     downloadFile,
     extractZip,
     runDebInstaller,
-    downloadAndExtract
+    downloadAndExtract,
+    wireDebugSession
 };
