@@ -22,7 +22,7 @@ deps:
 
 build:
 	rm -f *.vsix
-	npx @vscode/vsce package
+	npx --yes @vscode/vsce package
 
 build-gingaf:
 	$(MAKE) -C $(GINGA_CODE_GINGAF) release
