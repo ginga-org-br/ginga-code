@@ -59,7 +59,7 @@ function resolveCodeExecutable() {
 
     const whichCmd = isWin ? 'where' : 'which';
     try {
-        const whichRes = cp.spawnSync(whichCmd, [isWin ? 'code.cmd' : 'code'], { encoding: 'utf8', shell: isWin });
+        const whichRes = cp.spawnSync(whichCmd, [isWin ? 'code.cmd' : 'code'], { encoding: 'utf8' });
         if (whichRes.status === 0 && whichRes.stdout) {
             const lines = whichRes.stdout.trim().split(/\r?\n/);
             const found = lines.map(l => l.trim()).find(l => fs.existsSync(l) && !l.toLowerCase().includes('antigravity') && !l.startsWith('/mnt/'));
@@ -76,12 +76,30 @@ function resolveCodeExecutable() {
     return (raw && !raw.toLowerCase().includes('antigravity') && !raw.startsWith('/mnt/')) ? raw : 'code';
 }
 
+function quoteWinArg(arg) {
+    if (process.platform !== 'win32') return arg;
+    if (!arg || !arg.includes(' ')) return arg;
+    if (arg.startsWith('"') && arg.endsWith('"')) return arg;
+    return `"${arg}"`;
+}
+
+function spawnCodeSync(cmd, args, options) {
+    const isWin = process.platform === 'win32';
+    if (isWin) {
+        const commandLine = [quoteWinArg(cmd), ...(args || []).map(quoteWinArg)].join(' ');
+        return cp.spawnSync(commandLine, {
+            ...options,
+            shell: true
+        });
+    }
+    return cp.spawnSync(cmd, args || [], options);
+}
+
 function supportsCliOption(cmd, optionName) {
     try {
-        const isWin = process.platform === 'win32';
         const cleanEnv = { ...process.env };
         delete cleanEnv.VSCODE_IPC_HOOK_CLI;
-        const res = cp.spawnSync(cmd, ['--help'], { encoding: 'utf8', shell: isWin, timeout: 3000, env: cleanEnv });
+        const res = spawnCodeSync(cmd, ['--help'], { encoding: 'utf8', timeout: 3000, env: cleanEnv });
         const text = (res.stdout || '') + (res.stderr || '');
         return text.includes(optionName);
     } catch (_) {
@@ -103,7 +121,8 @@ function deployExtensionTo(destDir) {
 
 const codeCmd = resolveCodeExecutable();
 const vsix = fs.readdirSync('.').find(f => f.endsWith('.vsix'));
-const extId = 'ginga-org-br.ginga-code-0.2.0';
+const pkg = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'));
+const extId = `${pkg.publisher}.${pkg.name}-${pkg.version}`;
 
 function terminateStaleTestInstances() {
     if (process.platform !== 'win32') {
@@ -138,21 +157,18 @@ if (fs.existsSync(path.dirname(localExtDir))) {
 }
 
 if (vsix) {
-    const isWin = process.platform === 'win32';
     const cleanEnv = { ...process.env };
     delete cleanEnv.VSCODE_IPC_HOOK_CLI;
     const canUseExtDir = supportsCliOption(codeCmd, '--extensions-dir');
     try {
         if (canUseExtDir) {
-            cp.spawnSync(codeCmd, ['--extensions-dir=' + testExtDir, '--install-extension', vsix, '--force'], {
+            spawnCodeSync(codeCmd, ['--extensions-dir=' + testExtDir, '--install-extension', vsix, '--force'], {
                 stdio: 'inherit',
-                shell: isWin,
                 env: cleanEnv
             });
         }
-        cp.spawnSync(codeCmd, ['--install-extension', vsix, '--force'], {
+        spawnCodeSync(codeCmd, ['--install-extension', vsix, '--force'], {
             stdio: 'ignore',
-            shell: isWin,
             env: cleanEnv
         });
     } catch (_) {}
@@ -163,15 +179,22 @@ const gingafDir = path.resolve(expandHome(rawGingafDir));
 const isWin = process.platform === 'win32';
 const exeName = isWin ? 'gingaf.exe' : 'gingaf';
 
-const candidates = [
-    path.join(gingafDir, 'build', 'linux', 'x64', 'release', 'bundle', 'gingaf'),
-    path.join(gingafDir, 'build', 'windows', 'x64', 'runner', 'Release', 'gingaf.exe'),
-    path.join(gingafDir, 'build', 'macos', 'Build', 'Products', 'Release', 'gingaf.app', 'Contents', 'MacOS', 'gingaf'),
-    path.join(gingafDir, 'build', exeName),
-    path.join(gingafDir, 'build', 'ginga-lsp'),
-    path.join(gingafDir, 'bin', exeName),
-    path.join(gingafDir, exeName)
-];
+const candidates = isWin
+    ? [
+        path.join(gingafDir, 'build', 'windows', 'x64', 'runner', 'Release', 'gingaf.exe'),
+        path.join(gingafDir, 'build', exeName),
+        path.join(gingafDir, 'bin', exeName),
+        path.join(gingafDir, exeName)
+    ]
+    : [
+        path.join(gingafDir, 'build', 'linux', 'x64', 'release', 'bundle', 'gingaf'),
+        path.join(gingafDir, 'build', 'macos', 'Build', 'Products', 'Release', 'gingaf.app', 'Contents', 'MacOS', 'gingaf'),
+        path.join(gingafDir, 'build', 'windows', 'x64', 'runner', 'Release', 'gingaf.exe'),
+        path.join(gingafDir, 'build', exeName),
+        path.join(gingafDir, 'build', 'ginga-lsp'),
+        path.join(gingafDir, 'bin', exeName),
+        path.join(gingafDir, exeName)
+    ];
 
 let foundExe = candidates.find(p => fs.existsSync(p));
 if (!foundExe && fs.existsSync(gingafDir)) {
@@ -234,10 +257,16 @@ try {
 
 if (foundExe) {
     fs.mkdirSync(storageDir, { recursive: true });
+    const parentDir = path.dirname(foundExe);
+    const parentBase = path.basename(parentDir);
     const dest = path.join(storageDir, exeName);
     try {
-        fs.copyFileSync(foundExe, dest);
-        if (!isWin) {
+        if (parentBase === 'Release' || parentBase === 'bundle') {
+            fs.cpSync(parentDir, storageDir, { recursive: true, force: true });
+        } else {
+            fs.copyFileSync(foundExe, dest);
+        }
+        if (!isWin && fs.existsSync(dest)) {
             fs.chmodSync(dest, 0o755);
         }
     } catch (_) {}
@@ -269,10 +298,9 @@ if (!process.argv.includes('--no-launch') && !process.env.GINGA_SETUP_ONLY) {
     const cleanEnv = { ...process.env, DONT_PROMPT_WSL_INSTALL: '1' };
     delete cleanEnv.VSCODE_IPC_HOOK_CLI;
 
-    const res = cp.spawnSync(codeCmd, launchArgs, {
+    const res = spawnCodeSync(codeCmd, launchArgs, {
         stdio: 'inherit',
-        env: cleanEnv,
-        shell: isWin
+        env: cleanEnv
     });
     if (res.error) {
         console.error('Failed to launch VS Code:', res.error.message || res.error);

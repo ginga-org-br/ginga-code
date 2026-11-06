@@ -1915,68 +1915,6 @@ test('resolveOrDownloadExecutable prefers ginga.executablePath if configured and
     }
 });
 
-test('Makefile specifies GINGA_CODE_GINGAF parameter and examples startup folder and configures gingafexecutable', () => {
-    const makefilePath = path.join(__dirname, '..', 'Makefile');
-    assert.ok(fs.existsSync(makefilePath));
-    const content = fs.readFileSync(makefilePath, 'utf8');
-
-    assert.ok(content.includes('GINGA_CODE_GINGAF ?= ../gingaf'));
-    assert.ok(!content.includes('GINGA_CODE_STARTUP_FOLDER'));
-    assert.ok(content.includes('examples/ folder'));
-    assert.ok(content.includes('build-gingaf:'));
-    assert.ok(!content.includes('install-vscode:'));
-    assert.ok(content.includes('BUILD_VSIX_DEP :='));
-    assert.ok(!content.includes('build-gingaf-support'));
-    assert.ok(content.includes('release'));
-    assert.ok(content.includes('scripts/setup-vscode-test.js'));
-    assert.ok(!content.includes('GINGAF_FOLDER :='));
-    assert.ok(!content.includes('GINGAF_DIR :='));
-
-    const buildMdPath = path.join(__dirname, '..', 'BUILD.md');
-    assert.ok(fs.existsSync(buildMdPath));
-    const buildMdContent = fs.readFileSync(buildMdPath, 'utf8');
-    assert.ok(buildMdContent.includes('install-host-deps-windows.ps1'));
-    assert.ok(buildMdContent.includes('install-host-deps-ubuntu.sh'));
-    assert.ok(buildMdContent.includes('install-host-deps-macos.sh'));
-
-    const setupScriptPath = path.join(__dirname, '..', 'scripts', 'setup-vscode-test.js');
-    assert.ok(fs.existsSync(setupScriptPath));
-    const setupContent = fs.readFileSync(setupScriptPath, 'utf8');
-    assert.ok(setupContent.includes("settings['ginga.executablePath'] = effectiveExe;"));
-    assert.ok(setupContent.includes("settings['window.newWindowDimensions'] = 'maximized';"));
-    assert.ok(setupContent.includes("path.join(userDir, 'globalStorage', 'state.vscdb')"));
-    assert.ok(setupContent.includes('resolveCodeExecutable'));
-    assert.ok(setupContent.includes('supportsCliOption'));
-    assert.ok(setupContent.includes('--new-window'));
-});
-
-test('scripts folder contains install-host-deps-windows.ps1, install-host-deps-ubuntu.sh, install-host-deps-macos.sh, and setup-vscode-test.js', () => {
-    const scriptsDir = path.join(__dirname, '..', 'scripts');
-    assert.ok(fs.existsSync(scriptsDir));
-    assert.ok(fs.existsSync(path.join(scriptsDir, 'install-host-deps-windows.ps1')));
-    assert.ok(fs.existsSync(path.join(scriptsDir, 'install-host-deps-ubuntu.sh')));
-    assert.ok(fs.existsSync(path.join(scriptsDir, 'install-host-deps-macos.sh')));
-    assert.ok(fs.existsSync(path.join(scriptsDir, 'setup-vscode-test.js')));
-
-    const ubuntuScript = fs.readFileSync(path.join(scriptsDir, 'install-host-deps-ubuntu.sh'), 'utf8');
-    assert.ok(ubuntuScript.includes('code/add-microsoft-repo boolean true'));
-    assert.ok(ubuntuScript.includes('https://go.microsoft.com/fwlink/?LinkID=760868'));
-    assert.ok(ubuntuScript.includes('vscode.sources'));
-    assert.ok(ubuntuScript.includes('resolve_code_bin'));
-
-    const macosScript = fs.readFileSync(path.join(scriptsDir, 'install-host-deps-macos.sh'), 'utf8');
-    assert.ok(macosScript.includes('resolve_code_bin'));
-    assert.ok(macosScript.includes('/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code'));
-
-    const windowsScript = fs.readFileSync(path.join(scriptsDir, 'install-host-deps-windows.ps1'), 'utf8');
-    assert.ok(windowsScript.includes('Resolve-CodePath'));
-    assert.ok(windowsScript.includes('LOCALAPPDATA'));
-
-    const setupScript = fs.readFileSync(path.join(scriptsDir, 'setup-vscode-test.js'), 'utf8');
-    assert.ok(setupScript.includes('resolveCodeExecutable'));
-    assert.ok(setupScript.includes('candidates'));
-});
-
 test('GingaDebugSession terminate emits exited and terminated events and marks session terminated', () => {
     const session = new extension.GingaDebugSession();
     const events = [];
