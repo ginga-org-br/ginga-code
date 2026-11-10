@@ -54,7 +54,7 @@ test:
 	node test/extension.test.js
 
 clean:
-	rm -rf .vscode-test
+	rm -rf .vscode-test/*
 	rm -f *.vsix
 
 BUILD_VSIX_DEP := build

@@ -224,24 +224,13 @@ function updateSettingsFile(targetPath, effectiveExe) {
     settings['security.workspace.trust.startupPrompt'] = 'never';
     settings['security.workspace.trust.emptyWindow'] = 'open';
     settings['window.newWindowDimensions'] = 'maximized';
+    settings['git.openRepositoryInParentFolders'] = 'never';
     fs.writeFileSync(targetPath, JSON.stringify(settings, null, 2));
 }
 
 const userDir = path.resolve('.vscode-test', 'user', 'User');
 const effectiveExe = foundExe || path.join(gingafDir, exeName);
 updateSettingsFile(path.join(userDir, 'settings.json'), effectiveExe);
-
-const defaultUserConfigs = [
-    path.join(os.homedir(), '.config', 'Code', 'User', 'settings.json'),
-    process.env.APPDATA ? path.join(process.env.APPDATA, 'Code', 'User', 'settings.json') : null,
-    path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User', 'settings.json')
-].filter(Boolean);
-
-for (const p of defaultUserConfigs) {
-    if (fs.existsSync(path.dirname(p))) {
-        updateSettingsFile(p, effectiveExe);
-    }
-}
 
 const storageDir = path.join(userDir, 'globalStorage', 'ginga-org-br.ginga-code');
 try {
@@ -275,10 +264,6 @@ if (foundExe) {
 const rawTargetFolder = process.env.GINGA_CODE_STARTUP_FOLDER || (process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : 'examples');
 const targetFolder = expandHome(rawTargetFolder);
 const resolvedTarget = path.resolve(targetFolder);
-if (fs.existsSync(resolvedTarget)) {
-    const wsSettingsPath = path.join(resolvedTarget, '.vscode', 'settings.json');
-    updateSettingsFile(wsSettingsPath, effectiveExe);
-}
 
 console.log('Configured ginga.executablePath to: ' + effectiveExe);
 

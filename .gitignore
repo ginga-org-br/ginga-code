@@ -147,7 +147,8 @@ dist
 .tern-port
 
 # Stores VSCode versions used for testing VSCode extensions
-.vscode-test
+.vscode-test/*
+!.vscode-test/.gitkeep
 
 # yarn v2
 .yarn/cache
@@ -167,7 +168,8 @@ dist
 
 # End of https://www.toptal.com/developers/gitignore/api/node
 
-.vscode-test/
+.vscode-test/*
+!.vscode-test/.gitkeep
 *.vsix
 
 # Created by https://www.toptal.com/developers/gitignore/api/node
@@ -295,7 +297,8 @@ dist
 .tern-port
 
 # Stores VSCode versions used for testing VSCode extensions
-.vscode-test
+.vscode-test/*
+!.vscode-test/.gitkeep
 
 # yarn v2
 .yarn/cache
